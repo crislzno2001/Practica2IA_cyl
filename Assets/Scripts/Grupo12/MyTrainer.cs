@@ -5,10 +5,12 @@ using NavigationDJIA.World;
 using QMind;
 using QMind.Interfaces;
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using UnityEngine;
+using static UnityEngine.Rendering.DebugUI;
 
 public class MyTrainer : IQMindTrainer
 {
@@ -21,184 +23,190 @@ public class MyTrainer : IQMindTrainer
     public event EventHandler OnEpisodeStarted; // Evento que se dispara cuando comienza un nuevo episodio
     public event EventHandler OnEpisodeFinished; // Evento que se dispara cuando termina un episodio
 
-    private INavigationAlgorithm _navAlgorithm; // Algoritmo de navegación utilizado
+    private INavigationAlgorithm _navigationAlgorithm; // Algoritmo de navegación utilizado
     private WorldInfo _worldInfo; // Información sobre el mundo donde se mueve el agente
-    private QTable _qTable; // Tabla Q que almacena los valores Q para cada estado y acción
-    private QMindTrainerParams _trainerParams; // Parámetros para el entrenador Q-learning
-    private int _stepCounter; // Contador de pasos dentro del episodio
-    private int _totalEpisodes; // Número total de episodios completados
-    private QState _currentState; // Estado actual del agente
-    private readonly List<float> _episodeReturns; // Lista para almacenar retornos de cada episodio
+    private QTable _QTable; // Tabla Q que almacena los valores Q para cada estado y acción
+    private QMindTrainerParams _params; // Parámetros para el entrenador Q-learning
+    private int counter = 0; // Contador de pasos dentro del episodio
+    private int numEpisode = 0; // Número total de episodios completados
+    private QState currentState; // Estado actual del agente
+    private List<float> episodeReturns; // Lista para almacenar retornos de cada episodio
 
     // Constructor
     public MyTrainer()
     {
-        _episodeReturns = new List<float>(); // Inicializa la lista de retornos por episodio
+        episodeReturns = new List<float>(); // Inicializa la lista de retornos por episodio
     }
 
     // Realiza un paso de entrenamiento o ejecución
     public void DoStep(bool train)
     {
-        _currentState = new QState(AgentPosition, OtherPosition, _worldInfo);
-        Debug.Log($"Current State ID: {_currentState._idState}");
+        CellInfo agentNextCell;
+        CellInfo currentCell = AgentPosition;
+        int accion = -1;
 
-        int action;
-        CellInfo nextCell;
+        currentState = new QState(AgentPosition, OtherPosition, _worldInfo);
+        Debug.Log($"Current State ID: {currentState._idState}");
 
         do
         {
-            action = ShouldChooseRandomAction() ? ChooseRandomAction() : GetBestAction(); // Escoge una acción
-            nextCell = QMind.Utils.MoveAgent(action, AgentPosition, _worldInfo);
-        } while (!nextCell.Walkable && PenalizeInvalidMove(action));
+            if (EscogerNumeroAleatorio())
+            {
+                accion = AccionAleatoria(); // Escoge una acción aleatoria
+            }
+            else
+            {
+                accion = MejorAccion(); // Escoge la mejor acción basada en la tabla Q
+            }
+
+            agentNextCell = QMind.Utils.MoveAgent(accion, AgentPosition, _worldInfo);
+            if (!agentNextCell.Walkable)
+            {
+                // Si no se puede caminar, se actualiza el valor Q con una penalización
+                float Q = DevolverQ(accion);
+                float QNew = ActualizarQ(Q, 0, -10000);
+                _QTable.ActualizarQ(accion, currentState._nWalkable, currentState._sWalkable, currentState._eWalkable, currentState._wWalkable, currentState._playerUp, currentState._playerRight, QNew);
+            }
+
+        } while (!agentNextCell.Walkable); // Repite hasta que el agente se mueva a una celda transitable
 
         // Actualiza el valor Q para la acción tomada
-        UpdateQTable(action, nextCell);
+        float currentQ = DevolverQ(accion);
+        float bestNextQ = DevolverMaxQ(agentNextCell);
+        int reward = GetReward(agentNextCell, accion);
+        float actualizedQ = ActualizarQ(currentQ, bestNextQ, reward);
+        _QTable.ActualizarQ(accion, currentState._nWalkable, currentState._sWalkable, currentState._eWalkable, currentState._wWalkable, currentState._playerUp, currentState._playerRight, actualizedQ);
 
-        AgentPosition = nextCell; // Actualiza la posición del agente
-        OtherPosition = QMind.Utils.MoveOther(_navAlgorithm, OtherPosition, AgentPosition); // Actualiza la posición del otro jugador
+        AgentPosition = agentNextCell; // Actualiza la posición del agente
+        CellInfo otherCell = QMind.Utils.MoveOther(_navigationAlgorithm, OtherPosition, AgentPosition);
+        OtherPosition = otherCell; // Actualiza la posición del otro jugador
 
         // Actualiza el retorno acumulado
-        Return += CalculateReward(nextCell, action);
+        Return += reward;
 
-        // Maneja el fin del episodio
-        HandleEndOfEpisode();
-    }
-
-    // Penaliza una acción que lleva a una celda no transitable
-    private bool PenalizeInvalidMove(int action)
-    {
-        float currentQ = GetQValue(action);
-        float updatedQ = UpdateQValue(currentQ, 0, -10000);
-        _qTable.UpdateQ(action, _currentState._nWalkable, _currentState._sWalkable, _currentState._eWalkable, _currentState._wWalkable, _currentState._playerUp, _currentState._playerRight, updatedQ);
-        return false;
-    }
-
-    // Actualiza la tabla Q para la acción tomada
-    private void UpdateQTable(int action, CellInfo nextCell)
-    {
-        float currentQValue = GetQValue(action);
-        float bestNextQValue = GetMaxQValue(nextCell);
-        int reward = CalculateReward(nextCell, action);
-        float newQValue = UpdateQValue(currentQValue, bestNextQValue, reward);
-        _qTable.UpdateQ(action, _currentState._nWalkable, _currentState._sWalkable, _currentState._eWalkable, _currentState._wWalkable, _currentState._playerUp, _currentState._playerRight, newQValue);
-    }
-
-    // Maneja las condiciones de fin del episodio
-    private void HandleEndOfEpisode()
-    {
-        CurrentStep = _stepCounter;
-        if (OtherPosition == null || CurrentStep == _trainerParams.maxSteps || OtherPosition == AgentPosition)
+        CurrentStep = counter;
+        if (OtherPosition == null || CurrentStep == _params.maxSteps || OtherPosition == AgentPosition)
         {
+            // Si se cumple alguna condición de fin de episodio, empieza un nuevo episodio
             OnEpisodeFinished?.Invoke(this, EventArgs.Empty);
-            StartNewEpisode();
+            NuevoEpisodio();
         }
         else
         {
-            _stepCounter++;
+            counter += 1;
         }
     }
 
     // Inicia un nuevo episodio
-    private void StartNewEpisode()
+    private void NuevoEpisodio()
     {
         AgentPosition = _worldInfo.RandomCell(); // Asigna una nueva posición aleatoria al agente
         OtherPosition = _worldInfo.RandomCell(); // Asigna una nueva posición aleatoria al otro jugador
-        _stepCounter = 0;
-        CurrentStep = _stepCounter;
-        _totalEpisodes++;
-        CurrentEpisode = _totalEpisodes;
+        counter = 0;
+        CurrentStep = counter;
+        numEpisode++;
+        CurrentEpisode = numEpisode;
 
         // Almacena el retorno del episodio finalizado y calcula el promedio
-        if (_totalEpisodes > 1)
+        if (numEpisode > 1)
         {
-            _episodeReturns.Add(Return);
-            ReturnAveraged = _episodeReturns.Average();
+            episodeReturns.Add(Return);
+            ReturnAveraged = episodeReturns.Average();
         }
         Return = 0; // Reinicia el retorno acumulado para el nuevo episodio
 
-        if (_totalEpisodes % _trainerParams.episodesBetweenSaves == 0)
+        if (numEpisode % _params.episodesBetweenSaves == 0)
         {
-            SaveQTable(); // Guarda la tabla Q cada ciertos episodios
+            GuardarTablaQ(); // Guarda la tabla Q cada ciertos episodios
         }
         OnEpisodeStarted?.Invoke(this, EventArgs.Empty);
     }
 
     // Inicializa el entrenador con los parámetros y el mundo dados
-    public void Initialize(QMindTrainerParams trainerParams, WorldInfo worldInfo, INavigationAlgorithm navAlgorithm)
+    public void Initialize(QMindTrainerParams qMindTrainerParams, WorldInfo worldInfo, INavigationAlgorithm navigationAlgorithm)
     {
-        _navAlgorithm = Utils.InitializeNavigationAlgo(navAlgorithm, worldInfo); // Inicializa el algoritmo de navegación
+        _navigationAlgorithm = Utils.InitializeNavigationAlgo(navigationAlgorithm, worldInfo); // Inicializa el algoritmo de navegación
         _worldInfo = worldInfo; // Asigna la información del mundo
         AgentPosition = worldInfo.RandomCell(); // Asigna una posición aleatoria al agente
         OtherPosition = worldInfo.RandomCell(); // Asigna una posición aleatoria al otro jugador
         OnEpisodeStarted?.Invoke(this, EventArgs.Empty); // Dispara el evento de inicio de episodio
 
-        _trainerParams = trainerParams; // Asigna los parámetros del entrenador
-        _qTable = new QTable(worldInfo); // Crea una nueva tabla Q
-        _qTable.InitializeTable(); // Inicializa la tabla Q
+        _params = qMindTrainerParams; // Asigna los parámetros del entrenador
+        _QTable = new QTable(worldInfo); // Crea una nueva tabla Q
+        _QTable.InicializarTabla(); // Inicializa la tabla Q
     }
 
     // Decide si escoger una acción aleatoria
-    private bool ShouldChooseRandomAction()
+    private bool EscogerNumeroAleatorio()
     {
-        return UnityEngine.Random.Range(0.0f, 1.0f) <= _trainerParams.epsilon; // Decide si tomar una acción aleatoria basado en epsilon
+        float azar = UnityEngine.Random.Range(0.0f, 1.0f); // Genera un número aleatorio entre 0 y 1
+        return azar <= _params.epsilon; // Decide si tomar una acción aleatoria basado en epsilon
     }
 
     // Escoge una acción aleatoria
-    private int ChooseRandomAction()
+    private int AccionAleatoria()
     {
         return UnityEngine.Random.Range(0, 4); // Retorna un número aleatorio entre 0 y 3, representando las cuatro direcciones posibles
     }
 
     // Escoge la mejor acción basada en la tabla Q
-    private int GetBestAction()
+    private int MejorAccion()
     {
-        return _qTable.GetBestAction(_currentState._nWalkable, _currentState._sWalkable, _currentState._eWalkable, _currentState._wWalkable, _currentState._playerUp, _currentState._playerRight); // Devuelve la mejor acción según la tabla Q
+        return _QTable.DevolverMejorAccion(currentState._nWalkable, currentState._sWalkable, currentState._eWalkable, currentState._wWalkable, currentState._playerUp, currentState._playerRight); // Devuelve la mejor acción según la tabla Q
     }
 
     // Devuelve el valor Q para la acción actual
-    private float GetQValue(int action)
+    private float DevolverQ(int accion)
     {
-        return _qTable.GetQValue(action, _currentState._nWalkable, _currentState._sWalkable, _currentState._eWalkable, _currentState._wWalkable, _currentState._playerUp, _currentState._playerRight); // Devuelve el valor Q actual
+        return _QTable.DevolverQ(accion, currentState._nWalkable, currentState._sWalkable, currentState._eWalkable, currentState._wWalkable, currentState._playerUp, currentState._playerRight); // Devuelve el valor Q actual
     }
 
     // Devuelve el mejor valor Q para el siguiente estado
-    private float GetMaxQValue(CellInfo nextCell)
+    private float DevolverMaxQ(CellInfo nextCell)
     {
         QState nextState = new QState(nextCell, OtherPosition, _worldInfo); // Crea el siguiente estado
-        return _qTable.GetBestQValue(nextState._nWalkable, nextState._sWalkable, nextState._eWalkable, nextState._wWalkable, nextState._playerUp, nextState._playerRight); // Devuelve el mejor valor Q del siguiente estado
+        return _QTable.DevolverMejorQ(nextState._nWalkable, nextState._sWalkable, nextState._eWalkable, nextState._wWalkable, nextState._playerUp, nextState._playerRight); // Devuelve el mejor valor Q del siguiente estado
     }
 
     // Calcula la recompensa basada en la nueva posición del agente y la acción tomada
-    private int CalculateReward(CellInfo nextCell, int action)
+    private int GetReward(CellInfo nextCell, int accion)
     {
-        int initialDistance = Mathf.Abs(AgentPosition.x - OtherPosition.x) + Mathf.Abs(AgentPosition.y - OtherPosition.y); // Calcula la distancia inicial entre el agente y el otro jugador
-        int finalDistance = Mathf.Abs(nextCell.x - OtherPosition.x) + Mathf.Abs(nextCell.y - OtherPosition.y); // Calcula la distancia final entre el agente y el otro jugador
+        int distanciaRealInicial = Mathf.Abs(AgentPosition.x - OtherPosition.x) + Mathf.Abs(AgentPosition.y - OtherPosition.y); // Calcula la distancia inicial entre el agente y el otro jugador
+        int distanciaRealFinal = Mathf.Abs(nextCell.x - OtherPosition.x) + Mathf.Abs(nextCell.y - OtherPosition.y); // Calcula la distancia final entre el agente y el otro jugador
 
-        int reward = 0; // Inicializa la recompensa
-        if (nextCell.x == OtherPosition.x && nextCell.y == OtherPosition.y) return -100; // Penaliza si el agente se encuentra con el otro jugador
-        if (finalDistance > initialDistance) reward += 100; // Recompensa si la distancia aumenta
+        int recompensa = 0; // Inicializa la recompensa
+        if (nextCell.x == OtherPosition.x && nextCell.y == OtherPosition.y) { return -100; } // Penaliza si el agente se encuentra con el otro jugador
+        if (distanciaRealFinal > distanciaRealInicial)
+        {
+            recompensa += 100; // Recompensa si la distancia aumenta
+        }
         else
         {
-            if (finalDistance <= 2) reward -= 100; // Penaliza si la distancia es muy corta
-            reward -= 10; // Penaliza si la distancia no aumenta
+            if (distanciaRealFinal <= 2)
+            {
+                recompensa -= 100; // Penaliza si la distancia es muy corta
+            }
+            recompensa -= 10; // Penaliza si la distancia no aumenta
         }
         if ((nextCell.x == 0 && nextCell.y == 19) || (nextCell.x == 0 && nextCell.y == 0) || (nextCell.x == 19 && nextCell.y == 0) || (nextCell.x == 19 && nextCell.y == 19))
-            reward -= 1000; // Penaliza si el agente se encuentra en una esquina
+        {
+            recompensa -= 1000; // Penaliza si el agente se encuentra en una esquina
+        }
 
-        return reward; // Devuelve la recompensa calculada
+        return recompensa; // Devuelve la recompensa calculada
     }
 
     // Calcula el nuevo valor Q basado en la fórmula del Q-learning
-    private float UpdateQValue(float currentQ, float maxNextQ, int reward)
+    private float ActualizarQ(float currentQ, float maxNextQ, int reward)
     {
-        return (1 - _trainerParams.alpha) * currentQ + _trainerParams.alpha * (reward + _trainerParams.gamma * maxNextQ); // Calcula el nuevo valor Q usando la fórmula de Q-learning
+        return (1 - _params.alpha) * currentQ + _params.alpha * (reward + _params.gamma * maxNextQ); // Calcula el nuevo valor Q usando la fórmula de Q-learning
     }
 
     // Guarda la tabla Q en un archivo
-    private void SaveQTable()
+    private void GuardarTablaQ()
     {
         string filePath = @"Assets/Scripts/Grupo12/TablaQ.csv"; // Especifica la ruta del archivo
-        File.WriteAllLines(filePath, ToCsv(_qTable.QTableValues)); // Escribe la tabla Q en un archivo CSV
+        File.WriteAllLines(filePath, ToCsv(_QTable._tablaQ)); // Escribe la tabla Q en un archivo CSV
     }
 
     // Convierte la tabla Q a formato CSV
