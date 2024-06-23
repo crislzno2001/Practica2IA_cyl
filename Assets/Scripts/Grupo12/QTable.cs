@@ -29,12 +29,13 @@ public class QTable : MonoBehaviour
         {
             for (int j = 0; j < _numCols; j++)
             {
-                _tablaQ[i, j] = 0; // Inicializa todos los valores Q a 0
+                _tablaQ[i, j] = 0; // Inicializa todos los valores Q a -50
             }
         }
 
         InicializarEstados(); // Crea todos los estados posibles
     }
+
 
     // Inicializa los estados posibles en la tabla Q
     public void InicializarEstados()

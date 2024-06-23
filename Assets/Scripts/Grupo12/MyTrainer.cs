@@ -27,6 +27,7 @@ public class MyTrainer : IQMindTrainer
     private WorldInfo _worldInfo; // Información sobre el mundo donde se mueve el agente
     private QTable _QTable; // Tabla Q que almacena los valores Q para cada estado y acción
     private QMindTrainerParams _params; // Parámetros para el entrenador Q-learning
+
     private int counter = 0; // Contador de pasos dentro del episodio
     private int numEpisode = 0; // Número total de episodios completados
     private QState currentState; // Estado actual del agente
@@ -36,6 +37,7 @@ public class MyTrainer : IQMindTrainer
     public MyTrainer()
     {
         episodeReturns = new List<float>(); // Inicializa la lista de retornos por episodio
+      
     }
 
     // Realiza un paso de entrenamiento o ejecución
@@ -64,7 +66,7 @@ public class MyTrainer : IQMindTrainer
             {
                 // Si no se puede caminar, se actualiza el valor Q con una penalización
                 float Q = DevolverQ(accion);
-                float QNew = ActualizarQ(Q, 0, -10000);
+                float QNew = ActualizarQ(Q, 0, -1000);
                 _QTable.ActualizarQ(accion, currentState._nWalkable, currentState._sWalkable, currentState._eWalkable, currentState._wWalkable, currentState._playerUp, currentState._playerRight, QNew);
             }
 
@@ -132,9 +134,39 @@ public class MyTrainer : IQMindTrainer
         OnEpisodeStarted?.Invoke(this, EventArgs.Empty); // Dispara el evento de inicio de episodio
 
         _params = qMindTrainerParams; // Asigna los parámetros del entrenador
+        // Sobrescribir el valor de maxSteps
+        _params.maxSteps = 5000; // Cambia este valor al número máximo de pasos deseado
+
         _QTable = new QTable(worldInfo); // Crea una nueva tabla Q
         _QTable.InicializarTabla(); // Inicializa la tabla Q
+        LoadQTable(); // Cargar la tabla Q desde el archivo
     }
+
+
+    // Cargar la tabla Q desde el archivo
+    private void LoadQTable()
+    {
+        string filePath = @"Assets/Scripts/Grupo12/TablaQ.csv";
+        if (File.Exists(filePath))
+        {
+            using (StreamReader reader = new StreamReader(File.OpenRead(filePath)))
+            {
+                int rowCount = 0;
+                while (!reader.EndOfStream && rowCount < _QTable._numRows)
+                {
+                    var line = reader.ReadLine();
+                    var values = line.Split(';');
+                    for (int col = 0; col < values.Length; col++)
+                    {
+                        _QTable._tablaQ[rowCount, col] = float.Parse(values[col]);
+                    }
+                    rowCount++;
+                }
+            }
+        }
+    }
+
+    
 
     // Decide si escoger una acción aleatoria
     private bool EscogerNumeroAleatorio()
