@@ -19,11 +19,11 @@ public class QTable : MonoBehaviour
         this._numCols = 16 * 9; // Número de estados posibles
         this._tablaQ = new float[this._numRows, this._numCols]; // Inicializa la tabla Q
         this._listaEstados = new QState[_numCols]; // Inicializa la lista de estados
-        InicializarTabla(); // Llena la tabla Q con valores iniciales
+        initTable(); // Llena la tabla Q con valores iniciales
     }
 
     // Inicializa la tabla Q con valores predeterminados
-    public void InicializarTabla()
+    public void initTable()
     {
         for (int i = 0; i < _numRows; i++)
         {
@@ -62,14 +62,14 @@ public class QTable : MonoBehaviour
     }
 
     // Devuelve el valor Q para una acción específica
-    public float DevolverQ(int accion, bool n, bool s, bool e, bool w, int up, int right)
+    public float GetQ(int accion, bool n, bool s, bool e, bool w, int up, int right)
     {
         int indice = BuscarEstado(n, s, e, w, up, right); // Busca el estado correspondiente
         return _tablaQ[accion, indice]; // Devuelve el valor Q
     }
 
     // Devuelve la mejor acción basada en el estado actual
-    public int DevolverMejorAccion(bool n, bool s, bool e, bool w, int up, int right)
+    public int GetBestAction(bool n, bool s, bool e, bool w, int up, int right)
     {
         int indice = BuscarEstado(n, s, e, w, up, right); // Busca el estado correspondiente
 
@@ -90,7 +90,7 @@ public class QTable : MonoBehaviour
     }
 
     // Devuelve el mejor valor Q basado en el estado actual
-    public float DevolverMejorQ(bool n, bool s, bool e, bool w, int up, int right)
+    public float GetMaxQ(bool n, bool s, bool e, bool w, int up, int right)
     {
         int indice = BuscarEstado(n, s, e, w, up, right); // Busca el estado correspondiente
 
@@ -109,7 +109,7 @@ public class QTable : MonoBehaviour
     }
 
     // Actualiza el valor Q para una acción específica
-    public void ActualizarQ(int accion, bool n, bool s, bool e, bool w, int up, int right, float actualizedQ)
+    public void UpdateQTable(int accion, bool n, bool s, bool e, bool w, int up, int right, float actualizedQ)
     {
         int indice = BuscarEstado(n, s, e, w, up, right); // Busca el estado correspondiente
         _tablaQ[accion, indice] = actualizedQ; // Actualiza el valor Q

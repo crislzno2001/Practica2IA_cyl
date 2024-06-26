@@ -456,7 +456,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   agent: {fileID: 1405488106}
   oponent: {fileID: 921274857}
-  speed: 10
+  speed: 100000
   qMindClass: MyTester, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null
 --- !u!4 &403569453
 Transform:

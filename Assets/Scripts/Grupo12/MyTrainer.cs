@@ -1,5 +1,3 @@
-// MyTrainer es el entrenador que usa la tabla Q para aprender y tomar decisiones en un mundo.
-
 using NavigationDJIA.Interfaces;
 using NavigationDJIA.World;
 using QMind;
@@ -33,11 +31,14 @@ public class MyTrainer : IQMindTrainer
     private QState currentState; // Estado actual del agente
     private List<float> episodeReturns; // Lista para almacenar retornos de cada episodio
 
+    private List<CellInfo> recentPositions; // Lista para almacenar las posiciones recientes del agente
+    private float epsilonDecay = 0.99f; // Parámetro para controlar la disminución de epsilon
+
     // Constructor
     public MyTrainer()
     {
         episodeReturns = new List<float>(); // Inicializa la lista de retornos por episodio
-      
+        recentPositions = new List<CellInfo>(); // Inicializa la lista de posiciones recientes
     }
 
     // Realiza un paso de entrenamiento o ejecución
@@ -45,39 +46,57 @@ public class MyTrainer : IQMindTrainer
     {
         CellInfo agentNextCell;
         CellInfo currentCell = AgentPosition;
-        int accion = -1;
+        int action = -1;
 
         currentState = new QState(AgentPosition, OtherPosition, _worldInfo);
         Debug.Log($"Current State ID: {currentState._idState}");
 
+        int retries = 0;
         do
         {
-            if (EscogerNumeroAleatorio())
+            if (OnlyWayPossible(out action)) // Si solo hay una dirección posible, se elige esa acción
             {
-                accion = AccionAleatoria(); // Escoge una acción aleatoria
+                agentNextCell = QMind.Utils.MoveAgent(action, AgentPosition, _worldInfo);
+            }
+            else if (chooseRandom() || isStuck())
+            {
+                if (isStuck())
+                {
+                    _params.epsilon *= epsilonDecay; // Disminuye epsilon si está atascado
+                }
+                action = randomChoice(); // Escoge una acción aleatoria
+                agentNextCell = QMind.Utils.MoveAgent(action, AgentPosition, _worldInfo);
             }
             else
             {
-                accion = MejorAccion(); // Escoge la mejor acción basada en la tabla Q
+                action = bestActionPossible(); // Escoge la mejor acción basada en la tabla Q
+                agentNextCell = QMind.Utils.MoveAgent(action, AgentPosition, _worldInfo);
             }
 
-            agentNextCell = QMind.Utils.MoveAgent(accion, AgentPosition, _worldInfo);
             if (!agentNextCell.Walkable)
             {
-                // Si no se puede caminar, se actualiza el valor Q con una penalización
-                float Q = DevolverQ(accion);
-                float QNew = ActualizarQ(Q, 0, -1000);
-                _QTable.ActualizarQ(accion, currentState._nWalkable, currentState._sWalkable, currentState._eWalkable, currentState._wWalkable, currentState._playerUp, currentState._playerRight, QNew);
+                // Penalización por moverse a una celda no transitable
+                float Q = ReturnQTable(action);
+                float QNew = UpdateQTable(Q, 0, -1000);
+                _QTable.UpdateQTable(action, currentState._nWalkable, currentState._sWalkable, currentState._eWalkable, currentState._wWalkable, currentState._playerUp, currentState._playerRight, QNew);
             }
 
-        } while (!agentNextCell.Walkable); // Repite hasta que el agente se mueva a una celda transitable
+            retries++;
+        } while (!agentNextCell.Walkable && retries < 4); // Repite hasta que el agente se mueva a una celda transitable
+
+        // Si después de varios intentos no se puede mover, toma una acción aleatoria
+        if (!agentNextCell.Walkable)
+        {
+            action = randomChoice();
+            agentNextCell = QMind.Utils.MoveAgent(action, AgentPosition, _worldInfo);
+        }
 
         // Actualiza el valor Q para la acción tomada
-        float currentQ = DevolverQ(accion);
-        float bestNextQ = DevolverMaxQ(agentNextCell);
-        int reward = GetReward(agentNextCell, accion);
-        float actualizedQ = ActualizarQ(currentQ, bestNextQ, reward);
-        _QTable.ActualizarQ(accion, currentState._nWalkable, currentState._sWalkable, currentState._eWalkable, currentState._wWalkable, currentState._playerUp, currentState._playerRight, actualizedQ);
+        float currentQ = ReturnQTable(action);
+        float bestNextQ = GetMaxQ(agentNextCell);
+        int reward = GetReward(agentNextCell, action);
+        float actualizedQ = UpdateQTable(currentQ, bestNextQ, reward);
+        _QTable.UpdateQTable(action, currentState._nWalkable, currentState._sWalkable, currentState._eWalkable, currentState._wWalkable, currentState._playerUp, currentState._playerRight, actualizedQ);
 
         AgentPosition = agentNextCell; // Actualiza la posición del agente
         CellInfo otherCell = QMind.Utils.MoveOther(_navigationAlgorithm, OtherPosition, AgentPosition);
@@ -86,12 +105,15 @@ public class MyTrainer : IQMindTrainer
         // Actualiza el retorno acumulado
         Return += reward;
 
+        // Guarda la posición actual en la lista de posiciones recientes
+        SaveRecentPosition(AgentPosition);
+
         CurrentStep = counter;
         if (OtherPosition == null || CurrentStep == _params.maxSteps || OtherPosition == AgentPosition)
         {
             // Si se cumple alguna condición de fin de episodio, empieza un nuevo episodio
             OnEpisodeFinished?.Invoke(this, EventArgs.Empty);
-            NuevoEpisodio();
+            NewEpisode();
         }
         else
         {
@@ -99,8 +121,39 @@ public class MyTrainer : IQMindTrainer
         }
     }
 
+    // Verifica si solo hay una dirección posible y retorna la acción correspondiente
+    private bool OnlyWayPossible(out int action)
+    {
+        action = -1;
+        List<int> posibleActions = new List<int>();
+
+        CellInfo north = QMind.Utils.MoveAgent(0, AgentPosition, _worldInfo);
+        if (north.Walkable && !(north.x == OtherPosition.x && north.y == OtherPosition.y))
+            posibleActions.Add(0);
+
+        CellInfo east = QMind.Utils.MoveAgent(1, AgentPosition, _worldInfo);
+        if (east.Walkable && !(east.x == OtherPosition.x && east.y == OtherPosition.y))
+            posibleActions.Add(1);
+
+        CellInfo south = QMind.Utils.MoveAgent(2, AgentPosition, _worldInfo);
+        if (south.Walkable && !(south.x == OtherPosition.x && south.y == OtherPosition.y))
+            posibleActions.Add(2);
+
+        CellInfo west = QMind.Utils.MoveAgent(3, AgentPosition, _worldInfo);
+        if (west.Walkable && !(west.x == OtherPosition.x && west.y == OtherPosition.y))
+            posibleActions.Add(3);
+
+        if (posibleActions.Count == 1)
+        {
+            action = posibleActions[0];
+            return true;
+        }
+
+        return false;
+    }
+
     // Inicia un nuevo episodio
-    private void NuevoEpisodio()
+    private void NewEpisode()
     {
         AgentPosition = _worldInfo.RandomCell(); // Asigna una nueva posición aleatoria al agente
         OtherPosition = _worldInfo.RandomCell(); // Asigna una nueva posición aleatoria al otro jugador
@@ -108,6 +161,9 @@ public class MyTrainer : IQMindTrainer
         CurrentStep = counter;
         numEpisode++;
         CurrentEpisode = numEpisode;
+
+        // Limpiar la lista de posiciones recientes
+        recentPositions.Clear();
 
         // Almacena el retorno del episodio finalizado y calcula el promedio
         if (numEpisode > 1)
@@ -119,7 +175,7 @@ public class MyTrainer : IQMindTrainer
 
         if (numEpisode % _params.episodesBetweenSaves == 0)
         {
-            GuardarTablaQ(); // Guarda la tabla Q cada ciertos episodios
+            SaveQTable(); // Guarda la tabla Q cada ciertos episodios
         }
         OnEpisodeStarted?.Invoke(this, EventArgs.Empty);
     }
@@ -134,14 +190,12 @@ public class MyTrainer : IQMindTrainer
         OnEpisodeStarted?.Invoke(this, EventArgs.Empty); // Dispara el evento de inicio de episodio
 
         _params = qMindTrainerParams; // Asigna los parámetros del entrenador
-        // Sobrescribir el valor de maxSteps
         _params.maxSteps = 5000; // Cambia este valor al número máximo de pasos deseado
 
         _QTable = new QTable(worldInfo); // Crea una nueva tabla Q
-        _QTable.InicializarTabla(); // Inicializa la tabla Q
+        _QTable.initTable(); // Inicializa la tabla Q
         LoadQTable(); // Cargar la tabla Q desde el archivo
     }
-
 
     // Cargar la tabla Q desde el archivo
     private void LoadQTable()
@@ -166,76 +220,155 @@ public class MyTrainer : IQMindTrainer
         }
     }
 
-    
-
     // Decide si escoger una acción aleatoria
-    private bool EscogerNumeroAleatorio()
+    private bool chooseRandom()
     {
         float azar = UnityEngine.Random.Range(0.0f, 1.0f); // Genera un número aleatorio entre 0 y 1
         return azar <= _params.epsilon; // Decide si tomar una acción aleatoria basado en epsilon
     }
 
     // Escoge una acción aleatoria
-    private int AccionAleatoria()
+    private int randomChoice()
     {
         return UnityEngine.Random.Range(0, 4); // Retorna un número aleatorio entre 0 y 3, representando las cuatro direcciones posibles
     }
 
     // Escoge la mejor acción basada en la tabla Q
-    private int MejorAccion()
+    private int bestActionPossible()
     {
-        return _QTable.DevolverMejorAccion(currentState._nWalkable, currentState._sWalkable, currentState._eWalkable, currentState._wWalkable, currentState._playerUp, currentState._playerRight); // Devuelve la mejor acción según la tabla Q
+        return _QTable.GetBestAction(currentState._nWalkable, currentState._sWalkable, currentState._eWalkable, currentState._wWalkable, currentState._playerUp, currentState._playerRight); // Devuelve la mejor acción según la tabla Q
+    }
+
+    // Verifica si el agente está atascado
+    private bool isStuck()
+    {
+        if (recentPositions.Count < 3) return false; // Si hay menos de 3 posiciones recientes, no está atascado
+
+        var lastThreePositions = recentPositions.Skip(Math.Max(0, recentPositions.Count() - 3)); // Toma las últimas 3 posiciones
+        return lastThreePositions.Distinct().Count() <= 1; // Si las últimas 3 posiciones son iguales, el agente está atascado
+    }
+
+    // Guarda la posición actual en la lista de posiciones recientes
+    private void SaveRecentPosition(CellInfo position)
+    {
+        if (recentPositions.Count >= 10) // Si hay más de 10 posiciones recientes, elimina la más antigua
+        {
+            recentPositions.RemoveAt(0);
+        }
+        recentPositions.Add(position); // Añade la posición actual a la lista
     }
 
     // Devuelve el valor Q para la acción actual
-    private float DevolverQ(int accion)
+    private float ReturnQTable(int accion)
     {
-        return _QTable.DevolverQ(accion, currentState._nWalkable, currentState._sWalkable, currentState._eWalkable, currentState._wWalkable, currentState._playerUp, currentState._playerRight); // Devuelve el valor Q actual
+        return _QTable.GetQ(accion, currentState._nWalkable, currentState._sWalkable, currentState._eWalkable, currentState._wWalkable, currentState._playerUp, currentState._playerRight); // Devuelve el valor Q actual
     }
 
     // Devuelve el mejor valor Q para el siguiente estado
-    private float DevolverMaxQ(CellInfo nextCell)
+    private float GetMaxQ(CellInfo nextCell)
     {
         QState nextState = new QState(nextCell, OtherPosition, _worldInfo); // Crea el siguiente estado
-        return _QTable.DevolverMejorQ(nextState._nWalkable, nextState._sWalkable, nextState._eWalkable, nextState._wWalkable, nextState._playerUp, nextState._playerRight); // Devuelve el mejor valor Q del siguiente estado
+        return _QTable.GetMaxQ(nextState._nWalkable, nextState._sWalkable, nextState._eWalkable, nextState._wWalkable, nextState._playerUp, nextState._playerRight); // Devuelve el mejor valor Q del siguiente estado
+    }
+
+    // Verifica si hay una pared entre el agente y el otro jugador
+    private bool IsWallBeetween(CellInfo a, CellInfo b)
+    {
+        if (a == null || b == null) return false;
+
+        // Verificar si hay una pared en la misma fila o columna
+        if (a.x == b.x)
+        {
+            int minY = Math.Min(a.y, b.y);
+            int maxY = Math.Max(a.y, b.y);
+            for (int y = minY + 1; y < maxY; y++)
+            {
+                if (_worldInfo[a.x, y].Type == CellInfo.CellType.Wall)
+                {
+                    return true;
+                }
+            }
+        }
+        else if (a.y == b.y)
+        {
+            int minX = Math.Min(a.x, b.x);
+            int maxX = Math.Max(a.x, b.x);
+            for (int x = minX + 1; x < maxX; x++)
+            {
+                if (_worldInfo[x, a.y].Type == CellInfo.CellType.Wall)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    // Verifica si la celda está en una esquina (dos celdas adyacentes no transitables)
+    private bool IsInCorner(CellInfo cell)
+    {
+        bool left = cell.x > 0 && !_worldInfo[cell.x - 1, cell.y].Walkable;
+        bool right = cell.x < _worldInfo.WorldSize.x - 1 && !_worldInfo[cell.x + 1, cell.y].Walkable;
+        bool up = cell.y < _worldInfo.WorldSize.y - 1 && !_worldInfo[cell.x, cell.y + 1].Walkable;
+        bool down = cell.y > 0 && !_worldInfo[cell.x, cell.y - 1].Walkable;
+
+        // Verificar límites
+        bool leftLimit = cell.x == 0;
+        bool rightLimit = cell.x == _worldInfo.WorldSize.x - 1;
+        bool upLimit = cell.y == _worldInfo.WorldSize.y - 1;
+        bool downLimit = cell.y == 0;
+
+        return (left || leftLimit) && (down || downLimit) ||
+               (left || leftLimit) && (up || upLimit) ||
+               (right || rightLimit) && (down || downLimit) ||
+               (right || rightLimit) && (up || upLimit);
     }
 
     // Calcula la recompensa basada en la nueva posición del agente y la acción tomada
     private int GetReward(CellInfo nextCell, int accion)
     {
-        int distanciaRealInicial = Mathf.Abs(AgentPosition.x - OtherPosition.x) + Mathf.Abs(AgentPosition.y - OtherPosition.y); // Calcula la distancia inicial entre el agente y el otro jugador
-        int distanciaRealFinal = Mathf.Abs(nextCell.x - OtherPosition.x) + Mathf.Abs(nextCell.y - OtherPosition.y); // Calcula la distancia final entre el agente y el otro jugador
+        int InitialDistance = Mathf.Abs(AgentPosition.x - OtherPosition.x) + Mathf.Abs(AgentPosition.y - OtherPosition.y); // Calcula la distancia inicial entre el agente y el otro jugador
+        int FinalDistance = Mathf.Abs(nextCell.x - OtherPosition.x) + Mathf.Abs(nextCell.y - OtherPosition.y); // Calcula la distancia final entre el agente y el otro jugador
 
-        int recompensa = 0; // Inicializa la recompensa
+        int reward = 0; // Inicializa la recompensa
         if (nextCell.x == OtherPosition.x && nextCell.y == OtherPosition.y) { return -100; } // Penaliza si el agente se encuentra con el otro jugador
-        if (distanciaRealFinal > distanciaRealInicial)
+        if (FinalDistance > InitialDistance)
         {
-            recompensa += 100; // Recompensa si la distancia aumenta
+            reward += 100 * (FinalDistance - InitialDistance); // Recompensa proporcional al aumento de la distancia
         }
         else
         {
-            if (distanciaRealFinal <= 2)
+            if (FinalDistance <= 2)
             {
-                recompensa -= 100; // Penaliza si la distancia es muy corta
+                reward -= 100; // Penaliza si la distancia es muy corta
             }
-            recompensa -= 10; // Penaliza si la distancia no aumenta
-        }
-        if ((nextCell.x == 0 && nextCell.y == 19) || (nextCell.x == 0 && nextCell.y == 0) || (nextCell.x == 19 && nextCell.y == 0) || (nextCell.x == 19 && nextCell.y == 19))
-        {
-            recompensa -= 1000; // Penaliza si el agente se encuentra en una esquina
+            reward -= 10; // Penaliza si la distancia no aumenta
         }
 
-        return recompensa; // Devuelve la recompensa calculada
+        // Recompensa adicional si hay una pared entre el agente y el otro jugador
+        if (IsWallBeetween(nextCell, OtherPosition))
+        {
+            reward += 50;
+        }
+
+        // Penaliza si el agente se encuentra en una esquina
+        if (IsInCorner(nextCell))
+        {
+            reward -= 1000;
+        }
+
+        return reward; // Devuelve la recompensa calculada
     }
 
     // Calcula el nuevo valor Q basado en la fórmula del Q-learning
-    private float ActualizarQ(float currentQ, float maxNextQ, int reward)
+    private float UpdateQTable(float currentQ, float maxNextQ, int reward)
     {
         return (1 - _params.alpha) * currentQ + _params.alpha * (reward + _params.gamma * maxNextQ); // Calcula el nuevo valor Q usando la fórmula de Q-learning
     }
 
     // Guarda la tabla Q en un archivo
-    private void GuardarTablaQ()
+    private void SaveQTable()
     {
         string filePath = @"Assets/Scripts/Grupo12/TablaQ.csv"; // Especifica la ruta del archivo
         File.WriteAllLines(filePath, ToCsv(_QTable._tablaQ)); // Escribe la tabla Q en un archivo CSV
